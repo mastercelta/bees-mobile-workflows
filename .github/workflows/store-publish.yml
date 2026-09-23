@@ -1,0 +1,301 @@
+name: Bees · Store Publish v1
+
+on:
+  workflow_call:
+    inputs:
+      app_name:
+        required: true
+        type: string
+      bundle_id:
+        required: true
+        type: string
+      catalog_client:
+        required: true
+        type: string
+      source_branch:
+        required: true
+        type: string
+      source_sha:
+        required: true
+        type: string
+      api_environment:
+        required: true
+        type: string
+      play_track:
+        required: true
+        type: string
+      platforms:
+        required: true
+        type: string
+      build_number_floor:
+        required: false
+        type: number
+        default: 99
+      android_signing_ref:
+        required: false
+        type: string
+        default: ''
+      ios_signing_ref:
+        required: false
+        type: string
+        default: ''
+      shorebird_default:
+        description: Repository-level SHOREBIRD_ENABLED value
+        required: false
+        type: boolean
+        default: false
+      shorebird_mode:
+        description: default, true or false for this deployment
+        required: false
+        type: string
+        default: default
+    outputs:
+      build_number:
+        value: ${{ jobs.preflight.outputs.build_number }}
+      shorebird_used:
+        value: ${{ jobs.preflight.outputs.shorebird_enabled }}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mobile-store-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  preflight:
+    name: Preflight and reserve release
+    runs-on: [self-hosted, macOS]
+    permissions:
+      contents: write
+    outputs:
+      build_number: ${{ steps.reserve.outputs.number }}
+      shorebird_enabled: ${{ steps.shorebird.outputs.enabled }}
+    env:
+      APP_NAME: ${{ inputs.app_name }}
+      BUNDLE_ID: ${{ inputs.bundle_id }}
+      CATALOG_CLIENT: ${{ inputs.catalog_client }}
+      SOURCE_BRANCH: ${{ inputs.source_branch }}
+      SOURCE_SHA: ${{ inputs.source_sha }}
+      API_ENV: ${{ inputs.api_environment }}
+      PLAY_TRACK: ${{ inputs.play_track }}
+      PLATFORMS: ${{ inputs.platforms }}
+      BUILD_NUMBER_FLOOR: ${{ inputs.build_number_floor }}
+    steps:
+      - name: Checkout immutable application source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_sha }}
+          fetch-depth: 0
+
+      - name: Checkout canonical release kit
+        uses: actions/checkout@v4
+        with:
+          repository: mastercelta/bees-mobile-workflows
+          ref: ${{ github.workflow_sha }}
+          path: .bees-mobile-workflows
+
+      - name: Resolve optional Shorebird mode
+        id: shorebird
+        shell: bash
+        env:
+          MODE: ${{ inputs.shorebird_mode }}
+          DEFAULT_ENABLED: ${{ inputs.shorebird_default }}
+        run: |
+          set -euo pipefail
+          case "$MODE" in
+            default) enabled="$DEFAULT_ENABLED" ;;
+            true|false) enabled="$MODE" ;;
+            *) echo "shorebird_mode must be default, true or false" >&2; exit 2 ;;
+          esac
+          if [[ "$enabled" == true && "$PLAY_TRACK" != production ]]; then
+            echo "Shorebird may only be selected for production" >&2
+            exit 2
+          fi
+          echo "enabled=$enabled" >> "$GITHUB_OUTPUT"
+
+      - name: Validate immutable source and release policy
+        shell: bash
+        env:
+          SHOREBIRD_ENABLED: ${{ steps.shorebird.outputs.enabled }}
+        run: .bees-mobile-workflows/scripts/validate-release-config.sh
+
+      - name: Validate configured destinations and identities
+        shell: bash
+        env:
+          ANDROID_SIGNING_REF: ${{ inputs.android_signing_ref }}
+          IOS_SIGNING_REF: ${{ inputs.ios_signing_ref }}
+        run: |
+          set -euo pipefail
+          if [[ "$PLATFORMS" == android || "$PLATFORMS" == both ]]; then
+            [[ "$ANDROID_SIGNING_REF" = /* && -f "$ANDROID_SIGNING_REF/key.properties" ]]
+            [[ -n "${PLAY_SERVICE_ACCOUNT_JSON:-}" && -f "$PLAY_SERVICE_ACCOUNT_JSON" ]]
+            grep -R --fixed-strings "$BUNDLE_ID" android/app/build.gradle* >/dev/null
+          fi
+          if [[ "$PLATFORMS" == ios || "$PLATFORMS" == both ]]; then
+            [[ "$IOS_SIGNING_REF" = /* && -d "$IOS_SIGNING_REF" ]]
+            [[ -n "${ASC_KEY_FILE:-}" && -f "$ASC_KEY_FILE" ]]
+            grep -R --fixed-strings "$BUNDLE_ID" ios/Runner.xcodeproj/project.pbxproj >/dev/null
+          fi
+
+      - name: Validate Flutter application
+        shell: bash
+        run: |
+          set -euo pipefail
+          flutter pub get
+          flutter analyze --no-fatal-infos
+          flutter test --dart-define=API_ENV="$API_ENV"
+
+      - name: Reserve shared Android/iOS build number
+        id: reserve
+        shell: bash
+        run: |
+          set -euo pipefail
+          number=$(.bees-mobile-workflows/scripts/next-build-number.sh "$SOURCE_SHA")
+          [[ "$number" =~ ^[0-9]+$ ]]
+          echo "number=$number" >> "$GITHUB_OUTPUT"
+
+      - name: Release plan summary
+        shell: bash
+        run: |
+          {
+            echo "## Store release plan"
+            echo "- App: $APP_NAME"
+            echo "- Source: $SOURCE_SHA"
+            echo "- Environment: $API_ENV"
+            echo "- Play track: $PLAY_TRACK"
+            echo "- Platforms: $PLATFORMS"
+            echo "- Build: ${{ steps.reserve.outputs.number }}"
+            echo "- Shorebird: ${{ steps.shorebird.outputs.enabled }}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  android:
+    name: Android · Google Play
+    needs: preflight
+    if: inputs.platforms == 'android' || inputs.platforms == 'both'
+    runs-on: [self-hosted, macOS]
+    env:
+      BUNDLE_ID: ${{ inputs.bundle_id }}
+      SOURCE_SHA: ${{ inputs.source_sha }}
+      API_ENV: ${{ inputs.api_environment }}
+      PLAY_TRACK: ${{ inputs.play_track }}
+      ANDROID_SIGNING_REF: ${{ inputs.android_signing_ref }}
+      SHOREBIRD_ENABLED: ${{ needs.preflight.outputs.shorebird_enabled }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_sha }}
+      - name: Isolate Gradle and prepare signing
+        shell: bash
+        run: |
+          set -euo pipefail
+          GRADLE_HOME="$RUNNER_TEMP/${{ github.event.repository.name }}-gradle-${{ github.run_id }}"
+          mkdir -p "$GRADLE_HOME"
+          echo "GRADLE_USER_HOME=$GRADLE_HOME" >> "$GITHUB_ENV"
+          cp "$ANDROID_SIGNING_REF/key.properties" android/key.properties
+      - name: Build Android release
+        shell: bash
+        run: |
+          set -euo pipefail
+          args=(--release --build-number "${{ needs.preflight.outputs.build_number }}" --dart-define="API_ENV=$API_ENV" --dart-define="BUILD_COMMIT=$SOURCE_SHA")
+          if [[ "$SHOREBIRD_ENABLED" == true ]]; then
+            command -v shorebird >/dev/null
+            shorebird release android "${args[@]}"
+          else
+            flutter pub get
+            flutter build appbundle "${args[@]}"
+          fi
+          test -s build/app/outputs/bundle/release/app-release.aab
+      - name: Publish to Google Play
+        shell: bash
+        run: |
+          set -euo pipefail
+          fastlane supply \
+            --aab build/app/outputs/bundle/release/app-release.aab \
+            --package_name "$BUNDLE_ID" \
+            --track "$PLAY_TRACK" \
+            --release_status completed \
+            --json_key "$PLAY_SERVICE_ACCOUNT_JSON" \
+            --skip_upload_metadata true \
+            --skip_upload_images true \
+            --skip_upload_screenshots true
+      - name: Cleanup Android release material
+        if: always()
+        shell: bash
+        run: rm -f android/key.properties && rm -rf "${GRADLE_USER_HOME:-}"
+
+  ios:
+    name: iOS · TestFlight
+    needs: preflight
+    if: inputs.platforms == 'ios' || inputs.platforms == 'both'
+    runs-on: [self-hosted, macOS]
+    env:
+      BUNDLE_ID: ${{ inputs.bundle_id }}
+      SOURCE_SHA: ${{ inputs.source_sha }}
+      API_ENV: ${{ inputs.api_environment }}
+      IOS_SIGNING_REF: ${{ inputs.ios_signing_ref }}
+      SHOREBIRD_ENABLED: ${{ needs.preflight.outputs.shorebird_enabled }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_sha }}
+      - name: Build signed iOS release under BeesMac lock
+        shell: bash
+        run: |
+          set -euo pipefail
+          flutter pub get
+          build_args=(--release --build-number "${{ needs.preflight.outputs.build_number }}" --dart-define="API_ENV=$API_ENV" --dart-define="BUILD_COMMIT=$SOURCE_SHA")
+          if [[ "$SHOREBIRD_ENABLED" == true ]]; then
+            command -v shorebird >/dev/null
+            flock /tmp/bees-ios-build.lock shorebird release ios "${build_args[@]}"
+          else
+            flock /tmp/bees-ios-build.lock flutter build ipa "${build_args[@]}"
+          fi
+          ipa=$(find build/ios/ipa -maxdepth 1 -name '*.ipa' -print -quit)
+          test -n "$ipa" && test -s "$ipa"
+          echo "IPA_PATH=$ipa" >> "$GITHUB_ENV"
+      - name: Upload to TestFlight
+        shell: bash
+        run: |
+          set -euo pipefail
+          tmp="$RUNNER_TEMP/asc-${{ github.run_id }}.json"
+          python3 - "$tmp" <<'PY'
+          import json, os, sys
+          with open(sys.argv[1], 'w') as f:
+            json.dump({
+              'key_id': os.environ['ASC_KEY_ID'],
+              'issuer_id': os.environ['ASC_ISSUER_ID'],
+              'key_filepath': os.environ['ASC_KEY_FILE'],
+              'in_house': False,
+            }, f)
+          PY
+          echo "ASC_API_JSON=$tmp" >> "$GITHUB_ENV"
+          fastlane pilot upload \
+            --ipa "$IPA_PATH" \
+            --app_identifier "$BUNDLE_ID" \
+            --api_key_path "$tmp" \
+            --skip_waiting_for_build_processing false
+      - name: Cleanup iOS release material
+        if: always()
+        shell: bash
+        run: rm -f "${ASC_API_JSON:-}" && rm -rf build/ios/archive build/ios/ipa
+
+  summary:
+    name: Persist platform outcome
+    needs: [preflight, android, ios]
+    if: always()
+    runs-on: [self-hosted, macOS]
+    steps:
+      - name: Store summary
+        shell: bash
+        run: |
+          {
+            echo "## Store publication result"
+            echo "- Source: ${{ inputs.source_sha }}"
+            echo "- Build: ${{ needs.preflight.outputs.build_number }}"
+            echo "- Environment: ${{ inputs.api_environment }}"
+            echo "- Play track: ${{ inputs.play_track }}"
+            echo "- Shorebird: ${{ needs.preflight.outputs.shorebird_enabled }}"
+            echo "- Android: ${{ needs.android.result }}"
+            echo "- iOS: ${{ needs.ios.result }}"
+          } >> "$GITHUB_STEP_SUMMARY"

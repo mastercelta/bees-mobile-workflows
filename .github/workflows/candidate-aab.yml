@@ -1,0 +1,209 @@
+name: Bees · Candidate AAB v1
+
+on:
+  workflow_call:
+    inputs:
+      app_name:
+        required: true
+        type: string
+      bundle_id:
+        required: true
+        type: string
+      catalog_client:
+        required: true
+        type: string
+      source_branch:
+        required: true
+        type: string
+      source_sha:
+        required: true
+        type: string
+      api_environment:
+        required: true
+        type: string
+      build_number_floor:
+        required: false
+        type: number
+        default: 99
+      android_signing_ref:
+        required: true
+        type: string
+    outputs:
+      build_number:
+        description: Reserved global mobile build number
+        value: ${{ jobs.build.outputs.build_number }}
+      artifact_tag:
+        description: Durable candidate identifier
+        value: ${{ jobs.build.outputs.artifact_tag }}
+      public_url:
+        description: BeesMac public catalog URL
+        value: ${{ jobs.build.outputs.public_url }}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mobile-candidate-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Validate, sign and catalog AAB
+    runs-on: [self-hosted, macOS]
+    permissions:
+      contents: write
+    outputs:
+      build_number: ${{ steps.meta.outputs.build_number }}
+      artifact_tag: ${{ steps.meta.outputs.artifact_tag }}
+      public_url: ${{ steps.publish.outputs.public_url }}
+    env:
+      APP_NAME: ${{ inputs.app_name }}
+      BUNDLE_ID: ${{ inputs.bundle_id }}
+      CATALOG_CLIENT: ${{ inputs.catalog_client }}
+      SOURCE_BRANCH: ${{ inputs.source_branch }}
+      SOURCE_SHA: ${{ inputs.source_sha }}
+      API_ENV: ${{ inputs.api_environment }}
+      PLATFORMS: android
+      BUILD_NUMBER_FLOOR: ${{ inputs.build_number_floor }}
+      ANDROID_SIGNING_REF: ${{ inputs.android_signing_ref }}
+    steps:
+      - name: Checkout immutable application source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_sha }}
+          fetch-depth: 0
+
+      - name: Checkout canonical release kit
+        uses: actions/checkout@v4
+        with:
+          repository: mastercelta/bees-mobile-workflows
+          ref: ${{ github.workflow_sha }}
+          path: .bees-mobile-workflows
+
+      - name: Validate source and configuration
+        shell: bash
+        run: .bees-mobile-workflows/scripts/validate-release-config.sh
+
+      - name: Validate Android identity and signing reference
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ -f android/app/build.gradle || -f android/app/build.gradle.kts ]]
+          grep -R --fixed-strings "$BUNDLE_ID" android/app/build.gradle* >/dev/null
+          [[ "$ANDROID_SIGNING_REF" = /* ]] || { echo "Android signing reference must be absolute" >&2; exit 1; }
+          [[ -f "$ANDROID_SIGNING_REF/key.properties" ]] || { echo "Missing private key.properties reference" >&2; exit 1; }
+          store_file=$(sed -n 's/^storeFile=//p' "$ANDROID_SIGNING_REF/key.properties" | tail -1)
+          [[ "$store_file" = /* && -f "$store_file" ]] || { echo "Configured keystore does not exist" >&2; exit 1; }
+
+      - name: Isolate Gradle cache
+        shell: bash
+        run: |
+          set -euo pipefail
+          GRADLE_HOME="$RUNNER_TEMP/${{ github.event.repository.name }}-gradle-${{ github.run_id }}"
+          mkdir -p "$GRADLE_HOME"
+          echo "GRADLE_USER_HOME=$GRADLE_HOME" >> "$GITHUB_ENV"
+
+      - name: Validate Flutter application
+        shell: bash
+        run: |
+          set -euo pipefail
+          flutter pub get
+          flutter analyze --no-fatal-infos
+          flutter test --dart-define=API_ENV="$API_ENV"
+
+      - name: Reserve global build number
+        id: reserve
+        shell: bash
+        run: |
+          set -euo pipefail
+          number=$(.bees-mobile-workflows/scripts/next-build-number.sh "$SOURCE_SHA")
+          [[ "$number" =~ ^[0-9]+$ ]]
+          echo "number=$number" >> "$GITHUB_OUTPUT"
+
+      - name: Prepare Android signing
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp "$ANDROID_SIGNING_REF/key.properties" android/key.properties
+
+      - name: Build signed candidate AAB
+        shell: bash
+        run: |
+          set -euo pipefail
+          flutter build appbundle --release \
+            --build-number "${{ steps.reserve.outputs.number }}" \
+            --dart-define=API_ENV="$API_ENV" \
+            --dart-define=BUILD_COMMIT="$SOURCE_SHA"
+          test -s build/app/outputs/bundle/release/app-release.aab
+          magic=$(od -An -tx1 -N2 build/app/outputs/bundle/release/app-release.aab | tr -d ' \n')
+          [[ "$magic" == 504b ]] || { echo "AAB is not a ZIP container" >&2; exit 1; }
+
+      - name: Build immutable artifact metadata
+        id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(awk '/^version:/{print $2; exit}' pubspec.yaml | cut -d+ -f1)
+          short_sha=${SOURCE_SHA:0:12}
+          tag="aab-${SOURCE_BRANCH//\//-}-${API_ENV}-v${version}-b${{ steps.reserve.outputs.number }}-${short_sha}"
+          stage="$RUNNER_TEMP/$tag"
+          mkdir -p "$stage"
+          cp build/app/outputs/bundle/release/app-release.aab "$stage/$tag.aab"
+          (cd "$stage" && shasum -a 256 "$tag.aab" > SHA256SUMS)
+          python3 - "$stage/metadata.json" "$tag" "${{ steps.reserve.outputs.number }}" <<'PY'
+          import json, os, sys
+          data = {
+            "schema_version": 1,
+            "app_name": os.environ["APP_NAME"],
+            "bundle_id": os.environ["BUNDLE_ID"],
+            "catalog_client": os.environ["CATALOG_CLIENT"],
+            "source_branch": os.environ["SOURCE_BRANCH"],
+            "source_sha": os.environ["SOURCE_SHA"],
+            "api_environment": os.environ["API_ENV"],
+            "build_number": int(sys.argv[3]),
+            "artifact_tag": sys.argv[2],
+            "artifact_type": "aab",
+            "store_publish": False,
+          }
+          with open(sys.argv[1], "w") as f: json.dump(data, f, indent=2, sort_keys=True)
+          PY
+          echo "build_number=${{ steps.reserve.outputs.number }}" >> "$GITHUB_OUTPUT"
+          echo "artifact_tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "stage=$stage" >> "$GITHUB_OUTPUT"
+
+      - name: Publish durable candidate through BeesMac
+        id: publish
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${{ steps.meta.outputs.artifact_tag }}"
+          aab="${{ steps.meta.outputs.stage }}/$tag.aab"
+          beesmac apk push \
+            --client "$CATALOG_CLIENT" \
+            --file "$aab" \
+            --name "$APP_NAME" \
+            --version "$tag"
+          url="https://celular.beesdevelop.com/apks/$CATALOG_CLIENT/$tag/$tag.aab"
+          curl -fsS --range 0-1 "$url" | od -An -tx1 | tr -d ' \n' | grep -q '^504b'
+          echo "public_url=$url" >> "$GITHUB_OUTPUT"
+
+      - name: Candidate summary
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "## Candidate AAB"
+            echo "- App: $APP_NAME"
+            echo "- Source: $SOURCE_SHA"
+            echo "- Environment: $API_ENV"
+            echo "- Build: ${{ steps.reserve.outputs.number || 'not reserved' }}"
+            echo "- Shorebird: not used for candidates"
+            echo "- URL: ${{ steps.publish.outputs.public_url || 'not published' }}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Cleanup temporary signing and build material
+        if: always()
+        shell: bash
+        run: |
+          rm -f android/key.properties
+          rm -rf "${GRADLE_USER_HOME:-}" "${{ steps.meta.outputs.stage }}"

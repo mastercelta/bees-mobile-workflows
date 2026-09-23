@@ -1,0 +1,8 @@
+.DS_Store
+.dart_tool/
+build/
+*.jks
+key.properties
+play-service-account.json
+asc-api-key.json
+ExportOptions.plist
