@@ -151,7 +151,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          number=$(.bees-mobile-workflows/scripts/next-build-number.sh "$SOURCE_SHA")
+          number=$(.bees-mobile-workflows/scripts/next-build-number.sh "$SOURCE_SHA" "$API_ENV")
           [[ "$number" =~ ^[0-9]+$ ]]
           echo "number=$number" >> "$GITHUB_OUTPUT"
 

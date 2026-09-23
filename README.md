@@ -6,7 +6,7 @@ Reusable, versioned release workflows for Bees Flutter applications.
 
 - Candidate AAB and Store publication are separate manual approval boundaries.
 - Application source is always an immutable SHA validated against an allowed branch.
-- Android and iOS share one monotonic build-number stream using annotated `build-N` tags.
+- Android and iOS share one global monotonic build-number stream. Tags keep the environment prefix (`dev-N`, `qa-N`, `staging-N`, `prod-N`) without resetting the number between environments.
 - Signing identities remain on BeesMac and are referenced by path; Store runs never create or rotate keys.
 - Candidate AABs use conventional Flutter builds and never publish to Stores.
 - Store Android and iOS run independently so one platform result cannot hide the other.
