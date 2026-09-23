@@ -1,0 +1,19 @@
+name: Etiquetar versión en master
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  tag:
+    uses: mastercelta/bees-mobile-workflows/.github/workflows/tag-master.yml@v1
+    with:
+      source_sha: ${{ github.sha }}
+      source_branch: master
+      force_release_origin: ${{ github.event_name == 'workflow_dispatch' }}
+      merge_message: ${{ github.event.head_commit.message || '' }}
+    secrets: inherit

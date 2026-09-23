@@ -12,6 +12,17 @@ Reusable, versioned release workflows for Bees Flutter applications.
 - Store Android and iOS run independently so one platform result cannot hide the other.
 - Shorebird is optional per repository and per deployment, and is rejected outside `production`.
 
+## Included reusable workflows
+
+```text
+.github/workflows/candidate-aab.yml      Signed candidate AAB and durable catalog
+.github/workflows/store-publish.yml      Google Play and TestFlight publication
+.github/workflows/shorebird-patch.yml    Production Shorebird patches
+.github/workflows/tag-master.yml         Semantic version tags from master
+```
+
+Copy-ready wrappers and the repository-variable template live under [`use/`](use/README.md).
+
 ## Repository variables
 
 Each caller repository defines:

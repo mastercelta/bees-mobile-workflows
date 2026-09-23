@@ -1,0 +1,116 @@
+name: Bees · Tag Master v1
+
+on:
+  workflow_call:
+    inputs:
+      source_sha:
+        required: true
+        type: string
+      source_branch:
+        required: false
+        type: string
+        default: master
+      force_release_origin:
+        description: Manual caller explicitly authorizes version tagging
+        required: false
+        type: boolean
+        default: false
+      merge_message:
+        required: false
+        type: string
+        default: ''
+    outputs:
+      version_tag:
+        value: ${{ jobs.tag.outputs.version_tag }}
+      created:
+        value: ${{ jobs.tag.outputs.created }}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mobile-version-tag-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  tag:
+    name: Tag published master version
+    runs-on: [self-hosted, macOS]
+    permissions:
+      contents: write
+    outputs:
+      version_tag: ${{ steps.version.outputs.tag }}
+      created: ${{ steps.version.outputs.created }}
+    steps:
+      - name: Checkout published source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_sha }}
+          fetch-depth: 0
+
+      - name: Validate source and release origin
+        id: origin
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          SOURCE_BRANCH: ${{ inputs.source_branch }}
+          FORCE_RELEASE: ${{ inputs.force_release_origin }}
+          MERGE_MESSAGE: ${{ inputs.merge_message }}
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "source_sha must be immutable" >&2; exit 2; }
+          [[ "$SOURCE_BRANCH" == master ]] || { echo "version tags are created only from master" >&2; exit 2; }
+          git fetch origin master --no-tags
+          [[ "$(git rev-parse FETCH_HEAD)" == "$SOURCE_SHA" ]] || { echo "source_sha is not current origin/master" >&2; exit 2; }
+          if [[ "$FORCE_RELEASE" == true ]] || printf '%s' "$MERGE_MESSAGE" | grep -qiE "(from [^ ]*/|branch ')release/"; then
+            echo "release=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "release=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create semantic version tag
+        id: version
+        if: steps.origin.outputs.release == 'true'
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          set -euo pipefail
+          version=$(sed -n 's/^version:[[:space:]]*\([^+[:space:]]*\).*/\1/p' pubspec.yaml | head -1)
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([+-][0-9A-Za-z.-]+)?$ ]] || { echo "pubspec semantic version is invalid" >&2; exit 2; }
+          tag="v$version"
+          git fetch origin --tags --force
+          if git show-ref --tags --verify --quiet "refs/tags/$tag"; then
+            existing=$(git rev-list -n1 "$tag")
+            if [[ "$existing" == "$SOURCE_SHA" ]]; then
+              echo "tag=$tag" >> "$GITHUB_OUTPUT"
+              echo "created=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            if git merge-base --is-ancestor "$existing" "$SOURCE_SHA"; then
+              echo "$tag remains on ${existing:0:8}; current master did not increase pubspec version"
+              echo "tag=$tag" >> "$GITHUB_OUTPUT"
+              echo "created=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            echo "$tag already exists on unrelated commit $existing" >&2
+            exit 2
+          fi
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git tag -a "$tag" "$SOURCE_SHA" -m "Version $version"
+          git push origin "refs/tags/$tag"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "created=true" >> "$GITHUB_OUTPUT"
+
+      - name: Tag summary
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "## Master version tag"
+            echo "- Source: ${{ inputs.source_sha }}"
+            echo "- Release origin: ${{ steps.origin.outputs.release || 'unknown' }}"
+            echo "- Tag: ${{ steps.version.outputs.tag || 'none' }}"
+            echo "- Created: ${{ steps.version.outputs.created || 'false' }}"
+          } >> "$GITHUB_STEP_SUMMARY"

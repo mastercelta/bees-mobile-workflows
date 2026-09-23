@@ -1,0 +1,49 @@
+name: Subir a tiendas
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: SHA inmutable resuelto por Tracker
+        type: string
+        required: true
+      ambiente:
+        description: Ambiente API
+        type: choice
+        options: [dev, qa, staging, prod]
+        default: qa
+        required: true
+      track:
+        description: Canal Google Play
+        type: choice
+        options: [internal, alpha, beta, production]
+        default: internal
+        required: true
+      shorebird_mode:
+        description: Shorebird para este deploy
+        type: choice
+        options: [default, 'true', 'false']
+        default: default
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    uses: mastercelta/bees-mobile-workflows/.github/workflows/store-publish.yml@v1
+    with:
+      app_name: ${{ vars.STORE_APP_NAME }}
+      bundle_id: ${{ vars.STORE_BUNDLE_ID }}
+      catalog_client: ${{ vars.STORE_CATALOG_CLIENT }}
+      source_branch: ${{ vars.STORE_SOURCE_REF }}
+      source_sha: ${{ inputs.source_ref }}
+      api_environment: ${{ inputs.ambiente }}
+      play_track: ${{ inputs.track }}
+      platforms: ${{ vars.PUBLISH_STORES }}
+      build_number_floor: ${{ fromJSON(vars.BUILD_NUMBER_FLOOR || '99') }}
+      android_signing_ref: ${{ vars.ANDROID_SIGNING_REF }}
+      ios_signing_ref: ${{ vars.IOS_SIGNING_REF }}
+      shorebird_default: ${{ vars.SHOREBIRD_ENABLED == 'true' }}
+      shorebird_mode: ${{ inputs.shorebird_mode }}
+    secrets: inherit

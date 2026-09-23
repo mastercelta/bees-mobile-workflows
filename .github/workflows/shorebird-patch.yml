@@ -1,0 +1,187 @@
+name: Bees · Shorebird Patch v1
+
+on:
+  workflow_call:
+    inputs:
+      source_branch:
+        required: true
+        type: string
+      source_sha:
+        required: true
+        type: string
+      platforms:
+        description: android, ios or both
+        required: true
+        type: string
+      bundle_id:
+        required: true
+        type: string
+      android_signing_ref:
+        required: false
+        type: string
+        default: ''
+      ios_signing_ref:
+        required: false
+        type: string
+        default: ''
+      shorebird_enabled:
+        required: true
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mobile-shorebird-patch-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  patch:
+    name: Validate and publish Shorebird patch
+    runs-on: [self-hosted, macOS]
+    permissions:
+      contents: write
+    env:
+      SOURCE_BRANCH: ${{ inputs.source_branch }}
+      SOURCE_SHA: ${{ inputs.source_sha }}
+      PLATFORMS: ${{ inputs.platforms }}
+      BUNDLE_ID: ${{ inputs.bundle_id }}
+      ANDROID_SIGNING_REF: ${{ inputs.android_signing_ref }}
+      IOS_SIGNING_REF: ${{ inputs.ios_signing_ref }}
+      SHOREBIRD_ENABLED: ${{ inputs.shorebird_enabled }}
+      API_ENV: prod
+    steps:
+      - name: Checkout immutable patch source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_sha }}
+          fetch-depth: 0
+
+      - name: Validate patch source and configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$SHOREBIRD_ENABLED" == true ]] || { echo "Shorebird is disabled for this repository" >&2; exit 2; }
+          [[ "$PLATFORMS" =~ ^(android|ios|both)$ ]] || { echo "platforms must be android, ios or both" >&2; exit 2; }
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "source_sha must be immutable" >&2; exit 2; }
+          [[ "$SOURCE_BRANCH" == master || "$SOURCE_BRANCH" == release/* || "$SOURCE_BRANCH" == hotfix/* ]] || {
+            echo "patch source must be master, release/* or hotfix/*" >&2; exit 2;
+          }
+          git fetch origin "$SOURCE_BRANCH" --no-tags
+          git merge-base --is-ancestor "$SOURCE_SHA" FETCH_HEAD || { echo "source SHA does not belong to source branch" >&2; exit 2; }
+          command -v shorebird >/dev/null || { echo "Shorebird is not installed on BeesMac" >&2; exit 2; }
+          [[ -n "${SHOREBIRD_TOKEN:-}" ]] || { echo "SHOREBIRD_TOKEN is unavailable" >&2; exit 2; }
+
+      - name: Resolve latest production release
+        id: release
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin --tags --force
+          build=$(git tag -l 'prod-*' | sed -n 's/^prod-\([0-9][0-9]*\)$/\1/p' | sort -n | tail -1)
+          [[ -n "$build" ]] || { echo "No prod-N tag exists; published base release is unknown" >&2; exit 2; }
+          base_tag="prod-$build"
+          base_sha=$(git rev-list -n1 "$base_tag")
+          git merge-base --is-ancestor "$base_sha" "$SOURCE_SHA" || {
+            echo "$base_tag is not an ancestor of patch source" >&2; exit 2;
+          }
+          version=$(sed -n 's/^version:[[:space:]]*\([^+[:space:]]*\).*/\1/p' pubspec.yaml | head -1)
+          [[ -n "$version" ]] || { echo "pubspec version is missing" >&2; exit 2; }
+          echo "build=$build" >> "$GITHUB_OUTPUT"
+          echo "base_tag=$base_tag" >> "$GITHUB_OUTPUT"
+          echo "release_version=$version+$build" >> "$GITHUB_OUTPUT"
+
+      - name: Reject changes that require a Store release
+        shell: bash
+        run: |
+          set -euo pipefail
+          changes=$(git diff --name-only "${{ steps.release.outputs.base_tag }}" "$SOURCE_SHA")
+          blocked=$(printf '%s\n' "$changes" | grep -E '^(pubspec\.yaml|pubspec\.lock|ios/|android/|assets/|web/|macos/|windows/|linux/)' || true)
+          if [[ -n "$blocked" ]]; then
+            {
+              echo "## Patch rejected"
+              echo "These files require a new Store release:"
+              echo '```text'
+              echo "$blocked"
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 2
+          fi
+
+      - name: Validate Flutter patch source
+        shell: bash
+        run: |
+          set -euo pipefail
+          flutter pub get
+          flutter analyze --no-fatal-infos
+          flutter test --dart-define=API_ENV=prod
+
+      - name: Prepare platform identities
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$PLATFORMS" == android || "$PLATFORMS" == both ]]; then
+            [[ "$ANDROID_SIGNING_REF" = /* && -f "$ANDROID_SIGNING_REF/key.properties" ]]
+            cp "$ANDROID_SIGNING_REF/key.properties" android/key.properties
+            GRADLE_HOME="$RUNNER_TEMP/${{ github.event.repository.name }}-patch-gradle-${{ github.run_id }}"
+            mkdir -p "$GRADLE_HOME"
+            echo "GRADLE_USER_HOME=$GRADLE_HOME" >> "$GITHUB_ENV"
+          fi
+          if [[ "$PLATFORMS" == ios || "$PLATFORMS" == both ]]; then
+            [[ "$IOS_SIGNING_REF" = /* && -d "$IOS_SIGNING_REF" ]]
+            (cd ios && pod install)
+          fi
+
+      - name: Publish Shorebird patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "$PLATFORMS" in
+            android) targets=android ;;
+            ios) targets=ios ;;
+            both) targets=android,ios ;;
+          esac
+          patch_once() {
+            flock -w 3600 /tmp/bees-android-build.lock -c \
+              "flock -w 3600 /tmp/bees-ios-build.lock shorebird patch --platforms=$targets --no-confirm --release-version='${{ steps.release.outputs.release_version }}' -- --dart-define=API_ENV=prod --dart-define=BUILD_COMMIT=$SOURCE_SHA"
+          }
+          if ! patch_once; then
+            echo "First patch attempt failed; clearing only this run's isolated Gradle transforms and retrying once" >&2
+            rm -rf "${GRADLE_USER_HOME:-$RUNNER_TEMP/unused}"/caches/*/transforms
+            patch_once
+          fi
+
+      - name: Tag published patch
+        id: tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          base="parche-${{ steps.release.outputs.release_version }}"
+          git fetch origin --tags --force
+          n=1
+          while git show-ref --tags --verify --quiet "refs/tags/$base.$n"; do n=$((n + 1)); done
+          tag="$base.$n"
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git tag -a "$tag" "$SOURCE_SHA" -m "Shorebird patch $n over ${{ steps.release.outputs.release_version }} ($PLATFORMS)"
+          git push origin "refs/tags/$tag"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Patch summary
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "## Shorebird patch"
+            echo "- Base: ${{ steps.release.outputs.release_version || 'unresolved' }}"
+            echo "- Source: $SOURCE_SHA"
+            echo "- Platforms: $PLATFORMS"
+            echo "- Tag: ${{ steps.tag.outputs.tag || 'not published' }}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Cleanup patch material
+        if: always()
+        shell: bash
+        run: |
+          rm -f android/key.properties
+          if [[ -n "${GRADLE_USER_HOME:-}" ]]; then rm -rf "$GRADLE_USER_HOME"; fi

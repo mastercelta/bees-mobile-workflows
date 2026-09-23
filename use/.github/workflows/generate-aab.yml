@@ -1,0 +1,38 @@
+name: Generar AAB
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_branch:
+        description: Rama fuente
+        type: choice
+        options: [work, develop, qa]
+        default: work
+        required: true
+      source_ref:
+        description: SHA inmutable resuelto por Tracker
+        type: string
+        required: true
+      ambiente:
+        description: Ambiente API
+        type: choice
+        options: [dev, qa]
+        default: dev
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  candidate:
+    uses: mastercelta/bees-mobile-workflows/.github/workflows/candidate-aab.yml@v1
+    with:
+      app_name: ${{ vars.STORE_APP_NAME }}
+      bundle_id: ${{ vars.STORE_BUNDLE_ID }}
+      catalog_client: ${{ vars.STORE_CATALOG_CLIENT }}
+      source_branch: ${{ inputs.source_branch }}
+      source_sha: ${{ inputs.source_ref }}
+      api_environment: ${{ inputs.ambiente }}
+      build_number_floor: ${{ fromJSON(vars.BUILD_NUMBER_FLOOR || '99') }}
+      android_signing_ref: ${{ vars.ANDROID_SIGNING_REF }}
+    secrets: inherit
