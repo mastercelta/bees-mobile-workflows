@@ -39,6 +39,10 @@ on:
         required: false
         type: string
         default: ''
+      play_service_account_ref:
+        required: false
+        type: string
+        default: ''
       shorebird_default:
         description: Repository-level SHOREBIRD_ENABLED value
         required: false
@@ -125,11 +129,12 @@ jobs:
         env:
           ANDROID_SIGNING_REF: ${{ inputs.android_signing_ref }}
           IOS_SIGNING_REF: ${{ inputs.ios_signing_ref }}
+          PLAY_SERVICE_ACCOUNT_REF: ${{ inputs.play_service_account_ref }}
         run: |
           set -euo pipefail
           if [[ "$PLATFORMS" == android || "$PLATFORMS" == both ]]; then
             [[ "$ANDROID_SIGNING_REF" = /* && -f "$ANDROID_SIGNING_REF/key.properties" ]]
-            [[ -n "${PLAY_SERVICE_ACCOUNT_JSON:-}" && -f "$PLAY_SERVICE_ACCOUNT_JSON" ]]
+            [[ "$PLAY_SERVICE_ACCOUNT_REF" = /* && -f "$PLAY_SERVICE_ACCOUNT_REF" ]]
             grep -R --fixed-strings "$BUNDLE_ID" android/app/build.gradle* >/dev/null
           fi
           if [[ "$PLATFORMS" == ios || "$PLATFORMS" == both ]]; then
@@ -181,6 +186,7 @@ jobs:
       PLAY_TRACK: ${{ inputs.play_track }}
       ANDROID_SIGNING_REF: ${{ inputs.android_signing_ref }}
       SHOREBIRD_ENABLED: ${{ needs.preflight.outputs.shorebird_enabled }}
+      PLAY_SERVICE_ACCOUNT_REF: ${{ inputs.play_service_account_ref }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -215,7 +221,7 @@ jobs:
             --package_name "$BUNDLE_ID" \
             --track "$PLAY_TRACK" \
             --release_status completed \
-            --json_key "$PLAY_SERVICE_ACCOUNT_JSON" \
+            --json_key "$PLAY_SERVICE_ACCOUNT_REF" \
             --skip_upload_metadata true \
             --skip_upload_images true \
             --skip_upload_screenshots true

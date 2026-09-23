@@ -44,6 +44,7 @@ jobs:
       build_number_floor: ${{ fromJSON(vars.BUILD_NUMBER_FLOOR || '99') }}
       android_signing_ref: ${{ vars.ANDROID_SIGNING_REF }}
       ios_signing_ref: ${{ vars.IOS_SIGNING_REF }}
+      play_service_account_ref: ${{ vars.PLAY_SERVICE_ACCOUNT_REF }}
       shorebird_default: ${{ vars.SHOREBIRD_ENABLED == 'true' }}
       shorebird_mode: ${{ inputs.shorebird_mode }}
     secrets: inherit
