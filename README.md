@@ -157,5 +157,3 @@ jobs:
 - Immutable releases: `v1.0.0`, `v1.1.0`, etc.
 - Stable compatible channel: `v1`.
 - Breaking changes use a new major tag.
-
-Pilot callers: Rútalink, AppClubby, Restaurante, and GoLocal. Creation Basketball and ViaRentaCar are intentionally out of scope until the pilot is accepted.
