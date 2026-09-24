@@ -230,5 +230,20 @@ jobs:
         if: always()
         shell: bash
         run: |
+          set -u
           rm -f android/key.properties
-          rm -rf "${GRADLE_USER_HOME:-}" "${{ steps.meta.outputs.stage }}"
+          if [[ -x android/gradlew ]]; then
+            ./android/gradlew --stop >/dev/null 2>&1 || true
+          fi
+          cleanup_path() {
+            local path="$1" delay
+            [[ -n "$path" ]] || return 0
+            for delay in 0 1 2 4; do
+              (( delay == 0 )) || sleep "$delay"
+              rm -rf -- "$path" 2>/dev/null || true
+              [[ ! -e "$path" ]] && return 0
+            done
+            echo "::warning::Temporary cache is still busy and will be reclaimed by the runner: $path"
+          }
+          cleanup_path "${GRADLE_USER_HOME:-}"
+          cleanup_path "${{ steps.meta.outputs.stage }}"

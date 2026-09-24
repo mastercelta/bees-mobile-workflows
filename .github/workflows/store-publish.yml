@@ -259,7 +259,21 @@ jobs:
       - name: Cleanup Android release material
         if: always()
         shell: bash
-        run: rm -f android/key.properties && rm -rf "${GRADLE_USER_HOME:-}"
+        run: |
+          set -u
+          rm -f android/key.properties
+          if [[ -x android/gradlew ]]; then
+            ./android/gradlew --stop >/dev/null 2>&1 || true
+          fi
+          cache="${GRADLE_USER_HOME:-}"
+          if [[ -n "$cache" ]]; then
+            for delay in 0 1 2 4; do
+              (( delay == 0 )) || sleep "$delay"
+              rm -rf -- "$cache" 2>/dev/null || true
+              [[ ! -e "$cache" ]] && break
+            done
+            [[ ! -e "$cache" ]] || echo "::warning::Temporary Gradle cache is still busy and will be reclaimed by the runner: $cache"
+          fi
 
   ios:
     name: iOS · TestFlight
