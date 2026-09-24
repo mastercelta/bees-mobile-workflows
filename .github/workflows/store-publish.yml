@@ -298,11 +298,13 @@ jobs:
           tmp="$RUNNER_TEMP/asc-${{ github.run_id }}.json"
           python3 - "$tmp" <<'PY'
           import json, os, sys
+          with open(os.environ['ASC_KEY_FILE'], 'r', encoding='utf-8') as key_file:
+            key = key_file.read()
           with open(sys.argv[1], 'w') as f:
             json.dump({
               'key_id': os.environ['ASC_KEY_ID'],
               'issuer_id': os.environ['ASC_ISSUER_ID'],
-              'key_filepath': os.environ['ASC_KEY_FILE'],
+              'key': key,
               'in_house': False,
             }, f)
           PY
