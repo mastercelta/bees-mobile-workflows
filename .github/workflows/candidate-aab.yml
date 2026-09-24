@@ -114,7 +114,11 @@ jobs:
           set -euo pipefail
           flutter pub get
           flutter analyze --no-fatal-infos
-          flutter test --dart-define=API_ENV="$API_ENV"
+          # Unit/widget tests validate the repository-neutral contract. The
+          # selected API environment is injected only into the signed build;
+          # otherwise tests that explicitly exercise the no-define fallback
+          # are contaminated by release configuration.
+          flutter test
 
       - name: Reserve global build number
         id: reserve
