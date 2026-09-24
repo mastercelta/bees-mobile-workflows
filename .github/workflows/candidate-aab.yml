@@ -199,11 +199,11 @@ jobs:
           set -euo pipefail
           tag="${{ steps.meta.outputs.artifact_tag }}"
           aab="${{ steps.meta.outputs.stage }}/$tag.aab"
-          beesmac apk push \
-            --client "$CATALOG_CLIENT" \
-            --file "$aab" \
-            --name "$APP_NAME" \
-            --version "$tag"
+          beesmac apk push "$aab" \
+            --cliente "$CATALOG_CLIENT" \
+            --nombre "$tag" \
+            --titulo "$APP_NAME" \
+            --notas "Signed candidate AAB · $SOURCE_BRANCH · $API_ENV · ${SOURCE_SHA:0:12}"
           url="https://celular.beesdevelop.com/apks/$CATALOG_CLIENT/$tag/$tag.aab"
           curl -fsS --range 0-1 "$url" | od -An -tx1 | tr -d ' \n' | grep -q '^504b'
           echo "public_url=$url" >> "$GITHUB_OUTPUT"
