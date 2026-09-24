@@ -92,12 +92,6 @@ jobs:
           ref: ${{ inputs.source_sha }}
           fetch-depth: 0
 
-      - name: Checkout canonical release kit
-        uses: actions/checkout@v4
-        with:
-          repository: mastercelta/bees-mobile-workflows
-          ref: ${{ github.workflow_sha }}
-          path: .bees-mobile-workflows
 
       - name: Resolve optional Shorebird mode
         id: shorebird
@@ -122,7 +116,28 @@ jobs:
         shell: bash
         env:
           SHOREBIRD_ENABLED: ${{ steps.shorebird.outputs.enabled }}
-        run: .bees-mobile-workflows/scripts/validate-release-config.sh
+        run: |
+          set -euo pipefail
+          required=(APP_NAME BUNDLE_ID CATALOG_CLIENT SOURCE_SHA SOURCE_BRANCH API_ENV PLATFORMS)
+          for name in "${required[@]}"; do
+            [[ -n "${!name:-}" ]] || { echo "$name is required" >&2; exit 2; }
+          done
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "SOURCE_SHA must be immutable 40-char SHA" >&2; exit 2; }
+          [[ "$SOURCE_BRANCH" =~ ^(work|develop|qa|master|release/[A-Za-z0-9._/-]+)$ ]] || { echo "unsupported source branch" >&2; exit 2; }
+          [[ "$API_ENV" =~ ^(dev|qa|staging|prod)$ ]] || { echo "unsupported API environment" >&2; exit 2; }
+          [[ "$PLATFORMS" =~ ^(android|ios|both)$ ]] || { echo "PLATFORMS must be android, ios or both" >&2; exit 2; }
+          [[ "$PLAY_TRACK" =~ ^(internal|alpha|beta|production)$ ]] || { echo "unsupported Play track" >&2; exit 2; }
+          [[ "$BUNDLE_ID" =~ ^[A-Za-z][A-Za-z0-9]*(\.[A-Za-z][A-Za-z0-9]*)+$ ]] || { echo "invalid bundle id" >&2; exit 2; }
+          git fetch origin "$SOURCE_BRANCH" --no-tags
+          git cat-file -e "$SOURCE_SHA^{commit}"
+          git merge-base --is-ancestor "$SOURCE_SHA" FETCH_HEAD || { echo "$SOURCE_SHA does not belong to $SOURCE_BRANCH" >&2; exit 2; }
+          if [[ "$PLAY_TRACK" == production ]]; then
+            [[ "$API_ENV" == prod ]] || { echo "production track requires API_ENV=prod" >&2; exit 2; }
+            [[ "$SOURCE_BRANCH" == master || "$SOURCE_BRANCH" == release/* ]] || { echo "production requires master or release/* source" >&2; exit 2; }
+          fi
+          if [[ "$SHOREBIRD_ENABLED" == true && "$PLAY_TRACK" != production ]]; then
+            echo "Shorebird is allowed only for production publication" >&2; exit 2
+          fi
 
       - name: Validate configured destinations and identities
         shell: bash
@@ -156,7 +171,23 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          number=$(.bees-mobile-workflows/scripts/next-build-number.sh "$SOURCE_SHA" "$API_ENV")
+          [[ "$BUILD_NUMBER_FLOOR" =~ ^[0-9]+$ ]] || { echo "BUILD_NUMBER_FLOOR must be numeric" >&2; exit 2; }
+          git fetch origin --tags --force
+          max="$BUILD_NUMBER_FLOOR"
+          while IFS= read -r tag; do
+            candidate="${tag##*-}"
+            [[ "$candidate" =~ ^[0-9]+$ ]] || continue
+            (( candidate > max )) && max="$candidate"
+          done < <(git tag -l 'dev-*' -l 'qa-*' -l 'staging-*' -l 'prod-*')
+          number=''
+          for ((attempt=1; attempt<=100; attempt++)); do
+            candidate=$((max + attempt))
+            tag="$API_ENV-$candidate"
+            git tag -a "$tag" "$SOURCE_SHA" -m "Reserve $API_ENV mobile build $candidate for $SOURCE_SHA"
+            if git push origin "refs/tags/$tag"; then number="$candidate"; break; fi
+            git tag -d "$tag" >/dev/null 2>&1 || true
+            git fetch origin --tags --force
+          done
           [[ "$number" =~ ^[0-9]+$ ]]
           echo "number=$number" >> "$GITHUB_OUTPUT"
 
